@@ -1,0 +1,20 @@
+@'
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Env & local data
+.env
+.env.*
+db.json
+db.backup.json
+*.sqlite
+*.db
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+'@ | Out-File -Encoding utf8 .gitignore
