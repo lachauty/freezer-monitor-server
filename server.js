@@ -9,6 +9,16 @@ const path = require('path');
 
 dotenv.config();
 
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+
+function adminAuth(req, res, next) {
+  if (!ADMIN_TOKEN) return next();
+  const t = req.get('X-Admin-Token') || req.query.token || '';
+  if (t === ADMIN_TOKEN) return next();
+  res.status(403).json({ error: 'forbidden' });
+}
+
+
 // --- Email/SMS status log (for visibility) ---
 const emailEnabled =
   !!process.env.SMTP_HOST &&
@@ -41,14 +51,22 @@ console.log(
   "| MinGapSec:", DISCORD_MIN_SECONDS_BETWEEN_POSTS
 );
 
-// --- Alerts manager (email + generic notify hook) ---
 const { createAlertManager } = require('./alerts');
 const alerts = createAlertManager();
-setInterval(() => alerts.checkHeartbeats(), 60_000); // every minute
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+app.use(cors({ origin: false }));
+app.use(express.json({ limit: '64kb' }));
+
+function statesSnapshot() {
+  try { return alerts.getStates ? alerts.getStates() : []; } catch { return []; }
+}
+setInterval(() => alerts.checkHeartbeats(), 60_000);
+
+app.get('/status', adminAuth, (_req, res) => {
+  res.json({ devices: statesSnapshot() });
+});
 
 // --- Env knobs ---
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -66,7 +84,7 @@ async function initDb() {
   const file = path.join(__dirname, 'db.json');
   db = new Low(new JSONFile(file), { readings: [] });
   await db.read();
-  db.data ||= { readings: [] };
+  db.data ||= { readings: [], devices: {} };
 }
 const ready = initDb();
 
@@ -87,7 +105,9 @@ async function notifyDiscord(evt) {
 
   // evt shape: { kind: 'alert'|'recover'|'offline'|'online'|'fault'|'heartbeat', id, t, lower, upper, when, url }
   const kind = evt.kind || 'alert';
-  const deviceId = evt.id || 'ESP32';
+  const rawId = evt.id || 'ESP32';
+  const name = (db?.data?.devices && db.data.devices[rawId]?.name) || '';
+  const deviceId = name ? `${name} (${rawId})` : rawId;
   const tempC = typeof evt.t === 'number' ? evt.t : undefined;
   const lower = (evt.lower ?? LOWER);
   const upper = (evt.upper ?? UPPER);
@@ -132,9 +152,20 @@ async function notifyDiscord(evt) {
 alerts.setNotifier(notifyDiscord);
 
 // --- Routes ---
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', async (_req, res) => {
+  await ready;
+  res.json({
+    ok: true,
+    readings: db.data.readings.length,
+    devices: Object.keys(db.data.devices || {}).length,
+    env: { LOWER, UPPER, DEDUP_DELTA_C, KEEPALIVE_MS }
+  });
+});
 
 app.post('/ingest', auth, async (req, res) => {
+  if ((req.get('content-type') || '').indexOf('application/json') !== 0) {
+    return res.status(415).json({ error: 'application/json required' });
+  }
   await ready;
 
   const { device_id, temp_c, sr } = req.body || {};
@@ -156,13 +187,17 @@ app.post('/ingest', auth, async (req, res) => {
 
   const srNum = (sr >>> 0) || 0;
 
-  // Feed alerts on every ingest (even if we don't persist due to de-dup)
+  const devCfg = (db.data.devices && db.data.devices[device_id]) || null;
+  const lowerOverride = (devCfg && typeof devCfg.lowerC === 'number') ? devCfg.lowerC : undefined;
+  const upperOverride = (devCfg && typeof devCfg.upperC === 'number') ? devCfg.upperC : undefined;
   alerts.updateReading({
-    id: device_id,
-    t: temp_c,
-    sr: srNum,
-    ts: now,
-  });
+      id: device_id,
+      t: temp_c,
+      sr: srNum,
+      ts: now,
+      lower: lowerOverride,
+      upper: upperOverride,
+    });
 
   if (!Number.isFinite(prev.lastSavedTemp)) { shouldSave = true; reason = 'first'; }
   else if (delta >= DEDUP_DELTA_C) { shouldSave = true; reason = `delta>=${DEDUP_DELTA_C}`; }
@@ -204,6 +239,157 @@ app.post('/_test/alert', (req, res) => {
   res.json({ ok: true, sent: `Out-of-range for ${id} at ${t}°C` });
 });
 
+// --- Devices API (minimal) ---
+app.get('/devices', adminAuth, async (_req, res) => {
+  await ready;
+
+  const ids = new Set(db.data.readings.map(r => r.device_id));
+  Object.keys(db.data.devices || {}).forEach(id => ids.add(id));
+
+  const latestById = {};
+  for (let i = db.data.readings.length - 1; i >= 0; i--) {
+    const r = db.data.readings[i];
+    if (!latestById[r.device_id]) latestById[r.device_id] = r;
+  }
+
+  const out = [...ids].map(id => ({
+    id,
+    cfg: (db.data.devices && db.data.devices[id]) || null,
+    latest: latestById[id] || null,
+  }));
+  res.json({ devices: out });
+});
+
+app.get('/devices/:id', adminAuth, async (req, res) => {
+  await ready;
+  const id = req.params.id;
+  const cfg = (db.data.devices && db.data.devices[id]) || null;
+  const latestRec = [...db.data.readings].reverse().find(r => r.device_id === id) || null;
+  res.json({ id, cfg, latest: latestRec });
+});
+
+app.put('/devices/:id', adminAuth, async (req, res) => {
+  await ready;
+  const id = req.params.id;
+  const { lowerC, upperC, name, notes } = req.body || {};
+
+  const cfg = (db.data.devices && db.data.devices[id]) || {};
+  if (lowerC !== undefined) {
+    if (typeof lowerC !== 'number' || !Number.isFinite(lowerC)) {
+      return res.status(400).json({ error: 'lowerC must be a number' });
+    }
+    cfg.lowerC = lowerC;
+  }
+  if (upperC !== undefined) {
+    if (typeof upperC !== 'number' || !Number.isFinite(upperC)) {
+      return res.status(400).json({ error: 'upperC must be a number' });
+    }
+    cfg.upperC = upperC;
+  }
+  if (name !== undefined) cfg.name = String(name).slice(0, 80);
+  if (notes !== undefined) cfg.notes = String(notes).slice(0, 400);
+
+  db.data.devices ||= {};
+  db.data.devices[id] = cfg;
+  await db.write();
+  res.json({ ok: true, id, cfg });
+});
+
+app.get('/admin', adminAuth, (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(`<!doctype html><meta charset="utf-8">
+<title>Freezer Admin</title>
+<style>
+  :root{--b:#ddd;--t:#222;--m:24px}
+  body{font-family:system-ui,Segoe UI,Roboto,Apple Color Emoji,Noto Color Emoji;margin:var(--m);color:var(--t)}
+  input,button{padding:.45rem .6rem;font:inherit}
+  table{border-collapse:collapse;margin-top:12px;width:100%}
+  td,th{border:1px solid var(--b);padding:.45rem .6rem;text-align:left}
+  .hint{color:#666;margin:.5rem 0}
+  .ok{background:#edf7ed} .warn{background:#fff7e6} .bad{background:#ffecec}
+  .pill{display:inline-block;padding:.15rem .45rem;border-radius:999px;border:1px solid var(--b);font-size:.85rem}
+</style>
+<h1>Freezer Admin</h1>
+<div class="hint">Edit per-device bounds. Leave blank to use global env (${LOWER}…${UPPER} °C).</div>
+<div id="root">Loading…</div>
+<script>
+const token = new URLSearchParams(location.search).get('token') || '';
+async function load(){
+  const r=await fetch('/devices'+(token?('?token='+encodeURIComponent(token)):''));
+  const j=await r.json();
+  const el=document.getElementById('root');
+  el.innerHTML=\`
+  <table>
+    <tr><th>ID</th><th>Name</th><th>Last Temp</th><th>Bounds</th><th>Edit</th></tr>
+    \${j.devices.map(d=>{
+      const last=d.latest? \`\${d.latest.temp_c}°C @ \${d.latest.ts}\` : '—';
+      const lo = (d.cfg && d.cfg.lowerC!=null)? d.cfg.lowerC : '${LOWER}';
+      const hi = (d.cfg && d.cfg.upperC!=null)? d.cfg.upperC : '${UPPER}';
+      const name = d.cfg?.name || '';
+      return \`
+        <tr>
+          <td>\${d.id}</td>
+          <td>\${name}</td>
+          <td>\${last}</td>
+          <td>\${lo}…\${hi}</td>
+          <td>
+            <form onsubmit="return save(event,'\${d.id}')">
+              <input name="name" placeholder="name" value="\${name}">
+              <input name="lowerC" type="number" step="0.1" placeholder="lower" value="\${d.cfg?.lowerC ?? ''}">
+              <input name="upperC" type="number" step="0.1" placeholder="upper" value="\${d.cfg?.upperC ?? ''}">
+              <button>Save</button>
+              <a class="pill" href="/export.csv?device_id=\${encodeURIComponent(d.id)}\${token?('&token='+encodeURIComponent(token)) : ''}">Export CSV</a>
+            </form>
+          </td>
+        </tr>\`;
+    }).join('')}
+  </table>\`;
+}
+async function save(ev,id){
+  ev.preventDefault();
+  const f=new FormData(ev.target);
+  const body={};
+  for(const [k,v] of f.entries()){
+    if(k==='lowerC'||k==='upperC'){ if(v!=='') body[k]=Number(v); }
+    else body[k]=v;
+  }
+  const r=await fetch('/devices/'+encodeURIComponent(id)+(token?('?token='+encodeURIComponent(token)):''),{
+    method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)
+  });
+  if(!r.ok){alert('Save failed');return false;}
+  load(); return false;
+}
+load();
+</script>`);
+});
+
+app.get('/export.csv', adminAuth, async (req, res) => {
+  await ready;
+  const id = req.query.device_id;
+  if (!id) return res.status(400).send('device_id required');
+
+  const fromIso = req.query.from ? new Date(req.query.from) : null;
+  const toIso   = req.query.to   ? new Date(req.query.to)   : null;
+  if ((fromIso && Number.isNaN(fromIso.getTime())) || (toIso && Number.isNaN(toIso.getTime()))) {
+    return res.status(400).send('invalid from/to');
+  }
+
+  const rows = db.data.readings.filter(r => r.device_id === id && (
+    (!fromIso || new Date(r.ts) >= fromIso) &&
+    (!toIso   || new Date(r.ts) <= toIso)
+  ));
+
+  if (rows.length > 200000) return res.status(413).send('too many rows; narrow your time range');
+
+  res.setHeader('Content-Type','text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${id}.csv"`);
+
+  res.write('ts,temp_c,sr,device_id\n');
+  for (const r of rows) res.write(`${r.ts},${r.temp_c},${r.sr},${r.device_id}\n`);
+  res.end();
+});
+
+
 // --- Error handler (minimal) ---
 app.use((err, _req, res, _next) => {
   const code = err?.status || 500;
@@ -216,4 +402,9 @@ ready.then(() => {
   console.log(`Bounds: LOWER=${LOWER} UPPER=${UPPER}`);
   console.log(`Dedup: Δ≥${DEDUP_DELTA_C}°C, heartbeat=${KEEPALIVE_MS / 1000}s`);
   app.listen(PORT, '0.0.0.0');
+});
+
+process.on('SIGTERM', () => {
+  console.log('Shutting down…');
+  process.exit(0);
 });

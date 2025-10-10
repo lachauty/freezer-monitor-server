@@ -41,6 +41,7 @@ function shouldCooldown(state, key, now) {
   return true; // within cooldown window
 }
 
+
 function fmtBounds() {
   return `${LOWER}…${UPPER} °C`;
 }
@@ -65,6 +66,9 @@ async function sendEmail({ subject, text }) {
 
 function createAlertManager() {
   let notifier = null; // (evt) => void|Promise<void>
+  function getStates() {
+    return [...devices.entries()].map(([id, s]) => ({ id, ...s }));
+  }
 
   function setNotifier(fn) {
     notifier = fn;
@@ -117,7 +121,7 @@ function createAlertManager() {
     }
   }
 
-  function updateReading({ id, t, sr = 0, ts = Date.now() }) {
+  function updateReading({ id, t, sr = 0, ts = Date.now(), lower, upper }) {
     const now = ts;
     const rec = devices.get(id) || {
       lastTs: 0,
@@ -134,23 +138,26 @@ function createAlertManager() {
     // Basic fault flag check: any non-zero SR considered "fault"
     const faultNow = (sr >>> 0) !== 0;
 
+    const lowerNow = (typeof lower === 'number') ? lower : LOWER;
+    const upperNow = (typeof upper === 'number') ? upper : UPPER;
+
     // Determine current status based on temp & fault
     let statusNow = 'normal';
     if (faultNow) statusNow = 'fault';
-    else if (typeof t === 'number' && (t < LOWER || t > UPPER)) statusNow = 'alert';
+    else if (typeof t === 'number' && (t < lowerNow || t > upperNow)) statusNow = 'alert';
 
     // If previously offline and data now arrived, flip to online (one-time notification)
     if (wasOffline) {
       // Cooldown for 'online' is separate key
       if (!shouldCooldown(rec, 'online', now)) {
-        emitEvent({ kind: 'online', id, t, sr, when: new Date(now).toISOString() });
+        emitEvent({ kind: 'online', id, t, sr, lower: lowerNow, upper: upperNow, when: new Date(now).toISOString() });
       }
     }
 
     // Fault transition handling (immediate)
     if (statusNow === 'fault') {
       if (!shouldCooldown(rec, 'fault', now) || wasStatus !== 'fault') {
-        emitEvent({ kind: 'fault', id, t, sr, when: new Date(now).toISOString() });
+        emitEvent({ kind: 'fault', id, t, sr, lower: lowerNow, upper: upperNow, when: new Date(now).toISOString() });
       }
     }
 
@@ -162,12 +169,12 @@ function createAlertManager() {
       const spike = (Number.isFinite(rec.lastTemp) && Math.abs(t - rec.lastTemp) >= SPIKE_C);
       const key = 'alert';
       if (spike || !shouldCooldown(rec, key, now) || !wasAlert) {
-        emitEvent({ kind: 'alert', id, t, when: new Date(now).toISOString() });
+        emitEvent({ kind: 'alert', id, t, lower: lowerNow, upper: upperNow, when: new Date(now).toISOString() });
       }
     } else if (wasAlert && statusNow === 'normal') {
       // back in range
       if (!shouldCooldown(rec, 'recover', now)) {
-        emitEvent({ kind: 'recover', id, t, when: new Date(now).toISOString() });
+        emitEvent({ kind: 'recover', id, t, lower: lowerNow, upper: upperNow, when: new Date(now).toISOString() });
       }
     }
 
@@ -204,6 +211,7 @@ function createAlertManager() {
     updateReading,
     checkHeartbeats,
     setNotifier,
+    getStates,
   };
 }
 
