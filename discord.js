@@ -3,7 +3,7 @@
 // Requires Node 18+ (uses global fetch).
 
 const WEBHOOK = process.env.DISCORD_WEBHOOK_URL;
-const MIN_GAP_SEC = Number(process.env.DISCORD_MIN_SECONDS_BETWEEN_POSTS || 0);
+const ENV_MIN_GAP_SEC = Number(process.env.DISCORD_MIN_SECONDS_BETWEEN_POSTS || 0);
 
 let lastPostMs = 0;
 
@@ -12,14 +12,16 @@ function sleep(ms) {
 }
 
 async function postToDiscord(content, embeds = [], opts = {}) {
-  if (!WEBHOOK) {
+  const targetWebhook = opts.webhook_url || WEBHOOK;
+  if (!targetWebhook) {
     return { ok: false, skipped: true, reason: "DISCORD_WEBHOOK_URL missing" };
   }
 
   // simple flood control
   const now = Date.now();
-  if (MIN_GAP_SEC > 0 && now - lastPostMs < MIN_GAP_SEC * 1000) {
-    await sleep(MIN_GAP_SEC * 1000 - (now - lastPostMs));
+  const minGapSec = Number(opts.min_gap_sec ?? ENV_MIN_GAP_SEC);
+  if (minGapSec > 0 && now - lastPostMs < minGapSec * 1000) {
+    await sleep(minGapSec * 1000 - (now - lastPostMs));
   }
 
   const payload = {
@@ -30,7 +32,7 @@ async function postToDiscord(content, embeds = [], opts = {}) {
   if (opts.avatar_url) payload.avatar_url = opts.avatar_url;
 
   // thread support (optional)
-  let url = WEBHOOK;
+  let url = targetWebhook;
   if (opts.thread_id) url += (url.includes("?") ? "&" : "?") + "thread_id=" + encodeURIComponent(opts.thread_id);
 
   // up to 2 tries; handle 429 Retry-After

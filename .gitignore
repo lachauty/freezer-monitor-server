@@ -17,4 +17,23 @@ db.backup.json
 Thumbs.db
 .vscode/
 .idea/
+
+# Logs
+logs/
+*.log
+yarn-debug.log*
+yarn-error.log*
+npm-debug.log*
+
+# If you mount or write a data dir (e.g., DATA_DIR=/data)
+data/
+data/**
+/data/
+/data/**
+
+# Build/test artifacts (future-proofing)
+coverage/
+.nyc_output/
+dist/
+build/
 '@ | Out-File -Encoding utf8 .gitignore
