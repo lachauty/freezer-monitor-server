@@ -193,8 +193,8 @@ app.get('/export.csv', adminAuth, async (req, res) => {
   res.setHeader('Content-Type','text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${id}.csv"`);
 
-  res.write('ts,temp_c,sr,device_id\n');
-  for (const r of rows) res.write(`${r.ts},${r.temp_c},${r.sr},${r.device_id}\n`);
+  res.write('ts,ts_ms,temp_c,sr,device_id\n');
+  for (const r of rows) res.write(`${r.ts},${r.ts_ms ?? ''},${r.temp_c},${r.sr},${r.device_id}\n`);
   res.end();
 });
 
@@ -218,7 +218,7 @@ app.post('/ingest', auth, async (req, res) => {
   }
   await ready;
 
-  const { device_id, temp_c, sr } = req.body || {};
+  const { device_id, temp_c, sr, ts_ms } = req.body || {};
   if (!device_id || typeof temp_c !== 'number') {
     return res.status(400).json({ error: 'device_id and temp_c required' });
   }
@@ -229,7 +229,15 @@ app.post('/ingest', auth, async (req, res) => {
     return res.sendStatus(200);
   }
 
+  const clientTs = Number(ts_ms);
   const now = Date.now();
+  // accept device ts within ±48h and not NaN
+  const withinWindow = Number.isFinite(clientTs) && Math.abs(clientTs - now) < 48 * 3600 * 1000;
+  const tsUse = withinWindow ? clientTs : now;
+  if (!withinWindow && Number.isFinite(clientTs)) {
+    console.warn(`ts_ms out of window; using server time. device=${clientTs} server=${now}`);
+  }
+
   const prev = last.get(device_id) || { lastSavedTemp: undefined, lastSavedAt: 0, lastSr: undefined, lastSeenAt: 0 };
   const delta = Number.isFinite(prev.lastSavedTemp) ? Math.abs(temp_c - prev.lastSavedTemp) : Infinity;
   let reason = '';
@@ -250,14 +258,14 @@ app.post('/ingest', auth, async (req, res) => {
     id: device_id,
     t: temp_c,
     sr: srNum,
-    ts: now,
+    ts: tsUse,
     lower: lowerOverride,
     upper: upperOverride,
   });
 
   if (!Number.isFinite(prev.lastSavedTemp)) { shouldSave = true; reason = 'first'; }
   else if (delta >= DEDUP_DELTA_C) { shouldSave = true; reason = `delta>=${DEDUP_DELTA_C}`; }
-  else if (now - prev.lastSavedAt >= KEEPALIVE_MS) { shouldSave = true; reason = `heartbeat>${KEEPALIVE_MS}ms`; }
+  else if (tsUse - prev.lastSavedAt >= KEEPALIVE_MS) { shouldSave = true; reason = `heartbeat>${KEEPALIVE_MS}ms`; }
 
   // If fault status changes, save immediately
   if (!shouldSave && prev.lastSr !== undefined && prev.lastSr !== srNum) {
@@ -267,14 +275,15 @@ app.post('/ingest', auth, async (req, res) => {
   // Update last-seen regardless
   last.set(device_id, {
     lastSavedTemp: shouldSave ? temp_c : prev.lastSavedTemp,
-    lastSavedAt: shouldSave ? now : prev.lastSavedAt,
+    lastSavedAt: shouldSave ? tsUse : prev.lastSavedAt,
     lastSr: shouldSave ? srNum : (prev.lastSr ?? srNum),
-    lastSeenAt: now,
+    lastSeenAt: tsUse,
   });
 
   if (shouldSave) {
     const rec = {
-      ts: new Date(now).toISOString(),
+      ts: new Date(tsUse).toISOString(),
+      ts_ms: tsUse,
       device_id,
       temp_c: Math.round(temp_c * 100) / 100,
       sr: srNum,
