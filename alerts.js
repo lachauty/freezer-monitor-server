@@ -1,9 +1,5 @@
 // alerts.js
-// Email (email-to-SMS/MMS supported) via Brevo HTTP API (primary) or SMTP (fallback)
-// + alert state machine + cooldown + offline detection
-
-// --- Primary: Brevo HTTP API ---
-const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
+// Email via SMTP only (no Brevo, no SMS) + alert state machine + cooldown + offline detection
 
 // --- Fallback: SMTP (optional) ---
 const nodemailer = require("nodemailer");
@@ -25,11 +21,6 @@ const HEARTBEAT_SEC = Number(
 );
 const COOLDOWN_SEC = Number(process.env.ALERT_COOLDOWN_SEC ?? 900);
 const SPIKE_C = Number(process.env.SPIKE_C ?? 1.5);
-
-// IMPORTANT: do NOT fall back to ALERT_TO_EMAIL from env unless explicitly enabled
-const ALLOW_ENV_RECIPIENT_FALLBACK =
-  String(process.env.ALLOW_ENV_RECIPIENT_FALLBACK || "false").toLowerCase() ===
-  "true";
 
 let getConfig = () => ({});
 function setConfigGetter(fn) {
@@ -53,18 +44,13 @@ function shouldCooldown(state, key, now) {
 
 async function sendEmail({ subject, text }) {
   const cfg = getConfig() || {};
-  const alertsEnabled = !!cfg.alerts_enabled;
+  
+  if (!cfg.alerts_enabled) { console.log("(alerts disabled)", subject); return; }
+  if (!cfg.email_enabled)  { console.log("(email disabled)", subject);  return; }
 
-  if (!alertsEnabled) {
-    console.log("(alerts disabled)", subject);
-    return;
-  }
-
-  // Recipients: prefer DB config; (optionally) fallback to env if allowed
+  // Recipients: use DB-configured list only
   const configuredTo = (cfg.alert_to_email || "").trim();
-  const fallbackTo = (process.env.ALERT_TO_EMAIL || "").trim();
-  const toRaw = configuredTo || (ALLOW_ENV_RECIPIENT_FALLBACK ? fallbackTo : "");
-  const toList = toRaw.split(",").map((s) => s.trim()).filter(Boolean);
+  const toList = configuredTo.split(",").map((s) => s.trim()).filter(Boolean);
 
   if (toList.length === 0) {
     console.log("(email dry-run: no recipients)", { subject });
@@ -73,54 +59,10 @@ async function sendEmail({ subject, text }) {
 
   const fromEmail =
     cfg.alert_from_email ||
-    process.env.ALERT_FROM_EMAIL ||
-    process.env.SMTP_USER;
+    process.env.ALERT_FROM_EMAIL || // optional global default
+    process.env.SMTP_USER;          // fallback to SMTP user
 
-  // --- Preferred path: Brevo HTTP API (no SMTP/ports needed) ---
-  if (BREVO_API_KEY) {
-    const payload = {
-      sender: { email: fromEmail },
-      to: toList.map((e) => ({ email: e })),
-      subject: subject || "Freezer Alert",
-      textContent: text || "",
-    };
-
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const res = await fetch("https://api.brevo.com/v3/smtp/email", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "api-key": BREVO_API_KEY,
-          },
-          body: JSON.stringify(payload),
-        });
-
-        if (res.ok) {
-          console.log("Brevo API send ok");
-          return;
-        }
-        if (res.status === 429) {
-          const retryAfter = Number(res.headers.get("retry-after") || "1");
-          await new Promise((r) =>
-            setTimeout(r, Math.max(1, retryAfter) * 1000)
-          );
-          continue;
-        }
-        const body = await res.text().catch(() => "");
-        if (attempt === 2)
-          console.warn("Brevo API send error:", res.status, body);
-        else await new Promise((r) => setTimeout(r, 400));
-      } catch (e) {
-        if (attempt === 2)
-          console.warn("Brevo API exception:", e?.message || e);
-        else await new Promise((r) => setTimeout(r, 400));
-      }
-    }
-    return;
-  }
-
-  // --- Fallback: SMTP (useful on LAN/dev) ---
+  // --- SMTP send (only path) ---
   if (smtp) {
     try {
       await smtp.sendMail({
@@ -136,10 +78,7 @@ async function sendEmail({ subject, text }) {
     return;
   }
 
-  console.log(
-    "(email dry-run: no BREVO_API_KEY and no SMTP config)",
-    subject
-  );
+  console.log("(email dry-run: no SMTP config)", subject);
 }
 
 // Normalize & fan-out an event to email + optional notifier (e.g., Discord)

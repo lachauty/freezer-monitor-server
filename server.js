@@ -19,14 +19,14 @@ function adminAuth(req, res, next) {
   res.status(403).json({ error: 'forbidden' });
 }
 
-// --- Email/SMS status log (for visibility) ---
+// --- Email status log (for visibility) ---
 const emailEnabled =
   !!process.env.SMTP_HOST &&
   !!process.env.SMTP_USER &&
   !!process.env.SMTP_PASS;
 
 console.log(
-  "Email-to-SMS:",
+  "Email:",
   emailEnabled ? "SMTP CONNECTABLE" : "DRY-RUN (missing SMTP_*)",
   "| FROM=",
   process.env.ALERT_FROM_EMAIL || process.env.SMTP_USER || "(missing)"
@@ -107,6 +107,7 @@ async function notifyDiscord(evt) {
 
   // Respect the global enable switch
   if (!cfg.alerts_enabled) return;
+  if (!cfg.discord_enabled) return;          // new per-channel toggle
 
   const targetWebhook = cfg.discord_webhook_url || DISCORD_WEBHOOK_URL;
   if (!targetWebhook) return; // skip if not configured
@@ -247,12 +248,13 @@ app.post('/ingest', auth, async (req, res) => {
 
   const devCfg = (db.data.devices && db.data.devices[device_id]) || null;
   const cfg = getConfig();
+
   const lowerOverride =
     (devCfg && typeof devCfg.lowerC === 'number') ? devCfg.lowerC :
-    (typeof cfg.lowerC === 'number' ? cfg.lowerC : undefined);
+    (typeof cfg.lowerC === 'number' ? cfg.lowerC : LOWER);
   const upperOverride =
     (devCfg && typeof devCfg.upperC === 'number') ? devCfg.upperC :
-    (typeof cfg.upperC === 'number' ? cfg.upperC : undefined);
+    (typeof cfg.upperC === 'number' ? cfg.upperC : UPPER);
 
   alerts.updateReading({
     id: device_id,
@@ -398,6 +400,20 @@ app.put('/config', adminAuth, async (req, res) => {
     cfg.alerts_enabled = val;
   }
 
+  // Per-channel toggles
+  if (body.email_enabled !== undefined) {
+    const val = (typeof body.email_enabled === 'string')
+      ? ['1','true','on','yes'].includes(body.email_enabled.toLowerCase())
+      : !!body.email_enabled;
+    cfg.email_enabled = val;
+  }
+  if (body.discord_enabled !== undefined) {
+    const val = (typeof body.discord_enabled === 'string')
+      ? ['1','true','on','yes'].includes(body.discord_enabled.toLowerCase())
+      : !!body.discord_enabled;
+    cfg.discord_enabled = val;
+  }
+
   // Alert recipients (comma-separated emails; phones via carrier gateways)
   if (body.alert_to_email !== undefined) {
     cfg.alert_to_email = String(body.alert_to_email).trim();
@@ -449,7 +465,7 @@ app.get('/admin', adminAuth, (_req, res) => {
   .warn{margin-top:8px;padding:8px;border:1px dashed #f39;color:#b00;background:#fff4f6}
 </style>
 <h1>Freezer Admin</h1>
-<div class="hint">Edit per-device bounds. Leave blank to use global env (${LOWER}…${UPPER} °C). Use Global Settings to set recipients & Discord.</div>
+<div class="hint">Edit per-device bounds. Leave blank to use global env (${LOWER}…${UPPER} °C). Use Global Settings to set email recipients and/or Discord webhook.</div>
 <div id="root">Loading…</div>
 <script>
 const token = new URLSearchParams(location.search).get('token') || '';
@@ -471,24 +487,30 @@ async function load(){
     <h2 style="margin:0 0 8px 0">Global Settings</h2>
     <form id="globalForm" onsubmit="return saveConfig(event)">
       <div class="warn" id="alerts_warning" style="display:\${c.alerts_enabled ? 'none':'block'}">
-        Alerts are <b>disabled</b>. No email/SMS/Discord messages will be sent until you enable them and set recipients.
+        Alerts are <b>disabled</b>. No email or Discord messages will be sent until you enable them and set recipients.
       </div>
       <div style="margin:8px 0">
         <label style="display:inline-flex; gap:8px; align-items:center;">
           <input type="checkbox" name="alerts_enabled" id="alerts_enabled" \${c.alerts_enabled ? 'checked':''}>
-          Enable alerts (email/SMS + Discord)
+          Enable alerts (Email + Discord)
         </label>
+        <label style="display:inline-flex; gap:8px; align-items:center; margin-left:16px;">
+          <input type="checkbox" name="email_enabled"  id="email_enabled"  \${c.email_enabled ? 'checked':''}>
+          Email channel
+        </label>
+        <label style="display:inline-flex; gap:8px; align-items:center; margin-left:16px;">
+          <input type="checkbox" name="discord_enabled" id="discord_enabled" \${c.discord_enabled ? 'checked':''}>
+          Discord channel
+        </label>
+
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <label>Default Lower (°C): <input name="lowerC" type="number" step="0.1" value="\${q(c.lowerC)}"></label>
         <label>Default Upper (°C): <input name="upperC" type="number" step="0.1" value="\${q(c.upperC)}"></label>
-        <label>Alert To (email or 10digit@carrier): <input name="alert_to_email" placeholder="e.g. 4155551212@vzwpix.com" value="\${q(c.alert_to_email)}"></label>
-        <label>From Email (optional): <input name="alert_from_email" value="\${q(c.alert_from_email)}"></label>
+        <label>Alert To (comma-separated emails): <input name="alert_to_email" placeholder="e.g. alice@example.com,bob@lab.org" value="\${q(c.alert_to_email)}"></label>
       </div>
       <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
         <label>Discord Webhook URL: <input name="discord_webhook_url" style="min-width:420px" placeholder="https://discord.com/api/webhooks/..." value="\${q(c.discord_webhook_url)}"></label>
-        <label>Thread ID (optional): <input name="discord_thread_id" value="\${q(c.discord_thread_id)}"></label>
-        <label>Min Gap (s): <input name="discord_min_gap_sec" type="number" min="0" step="1" value="\${q(c.discord_min_gap_sec)}"></label>
       </div>
       <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap">
         <button>Save</button>
@@ -545,9 +567,11 @@ async function saveConfig(ev){
   const f = new FormData(ev.target);
   const body = {};
   // always send alerts_enabled
-  body.alerts_enabled = document.getElementById('alerts_enabled')?.checked ? true : false;
+  body.alerts_enabled = !!document.getElementById('alerts_enabled')?.checked;
+  body.email_enabled   = !!document.getElementById('email_enabled')?.checked;
+  body.discord_enabled = !!document.getElementById('discord_enabled')?.checked;
   for (const [k,v] of f.entries()) {
-    if (k==='alerts_enabled') continue; // handled above
+    if (k==='alerts_enabled' || k==='email_enabled' || k==='discord_enabled') continue; // handled above
     if (v === '') continue;
     if (k==='lowerC' || k==='upperC' || k==='discord_min_gap_sec') body[k] = Number(v);
     else body[k] = v;
