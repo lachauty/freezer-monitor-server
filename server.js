@@ -20,16 +20,24 @@ function adminAuth(req, res, next) {
 }
 
 // --- Email status log (for visibility) ---
-const emailEnabled =
-  !!process.env.SMTP_HOST &&
-  !!process.env.SMTP_USER &&
-  !!process.env.SMTP_PASS;
+const EMAIL_PROVIDER = (process.env.EMAIL_PROVIDER || 'smtp').toLowerCase();
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || '';
+
+let emailStatus = "DRY-RUN";
+if (EMAIL_PROVIDER === 'resend') {
+  emailStatus = RESEND_API_KEY ? "HTTPS OK (Resend)" : "MISSING RESEND_API_KEY";
+} else if (EMAIL_PROVIDER === 'sendgrid') {
+  emailStatus = SENDGRID_API_KEY ? "HTTPS OK (SendGrid)" : "MISSING SENDGRID_API_KEY";
+} else {
+  const smtpReady = !!process.env.SMTP_HOST && !!process.env.SMTP_USER && !!process.env.SMTP_PASS;
+  emailStatus = smtpReady ? "SMTP CONNECTABLE" : "DRY-RUN (missing SMTP_*)";
+}
 
 console.log(
-  "Email:",
-  emailEnabled ? "SMTP CONNECTABLE" : "DRY-RUN (missing SMTP_*)",
-  "| FROM=",
-  process.env.ALERT_FROM_EMAIL || process.env.SMTP_USER || "(missing)"
+  "Email:", emailStatus,
+  "| PROVIDER=", EMAIL_PROVIDER,
+  "| FROM=", process.env.ALERT_FROM_EMAIL || process.env.SMTP_USER || "(missing)"
 );
 
 // --- Discord (optional) ---

@@ -1,7 +1,10 @@
 // alerts.js
-// Email via SMTP only (no Brevo, no SMS) + alert state machine + cooldown + offline detection
 
-// --- Fallback: SMTP (optional) ---
+const EMAIL_PROVIDER = (process.env.EMAIL_PROVIDER || 'smtp').toLowerCase();
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || '';
+
+
 const nodemailer = require("nodemailer");
 const smtpEnvReady =
   !!process.env.SMTP_HOST && !!process.env.SMTP_USER && !!process.env.SMTP_PASS;
@@ -42,43 +45,166 @@ function shouldCooldown(state, key, now) {
   return true; // within cooldown window
 }
 
-async function sendEmail({ subject, text }) {
-  const cfg = getConfig() || {};
-  
-  if (!cfg.alerts_enabled) { console.log("(alerts disabled)", subject); return; }
-  if (!cfg.email_enabled)  { console.log("(email disabled)", subject);  return; }
+function parseRecipients(s) {
+  if (!s) return [];
+  return String(s)
+    .split(/[,\s;]+/)
+    .map(x => x.trim())
+    .filter(Boolean);
+}
 
-  // Recipients: use DB-configured list only
-  const configuredTo = (cfg.alert_to_email || "").trim();
-  const toList = configuredTo.split(",").map((s) => s.trim()).filter(Boolean);
-
-  if (toList.length === 0) {
-    console.log("(email dry-run: no recipients)", { subject });
-    return;
+async function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+async function withRetries(fn, { tries=2, baseMs=600 } = {}) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    last = await fn();
+    if (last && last.ok) return last;
+    await sleep(baseMs * Math.pow(2, i) + Math.floor(Math.random()*120));
   }
+  return last || { ok: false };
+}
 
-  const fromEmail =
-    cfg.alert_from_email ||
-    process.env.ALERT_FROM_EMAIL || // optional global default
-    process.env.SMTP_USER;          // fallback to SMTP user
+async function sendEmail({ subject, text, html, to }) {
+  try {
+    // Pull runtime config (from DB via server.js)
+    const cfg = getConfig() || {};
+    const alertsEnabled = !!cfg.alerts_enabled;
+    const emailEnabled  = cfg.email_enabled !== undefined ? !!cfg.email_enabled : true;
 
-  // --- SMTP send (only path) ---
-  if (smtp) {
-    try {
-      await smtp.sendMail({
-        from: fromEmail,
-        to: toList,
-        subject,
-        text,
-      });
-      console.log("SMTP send ok");
-    } catch (e) {
-      console.warn("SMTP send error:", e?.message || e);
+    if (!alertsEnabled || !emailEnabled) {
+      return { ok: false, skipped: true, reason: 'email disabled in config' };
     }
-    return;
-  }
 
-  console.log("(email dry-run: no SMTP config)", subject);
+    // Recipients: explicit 'to' wins; else config; else env fallback
+    let recipients = [];
+    if (to) {
+      recipients = Array.isArray(to) ? to : [to];
+    } else {
+      recipients = parseRecipients(cfg.alert_to_email || process.env.ALERT_TO_EMAIL || '');
+    }
+    if (recipients.length === 0) {
+      return { ok: false, skipped: true, reason: 'no recipients configured' };
+    }
+
+    const fromAddr =
+      (cfg.alert_from_email && String(cfg.alert_from_email).trim()) ||
+      process.env.ALERT_FROM_EMAIL ||
+      process.env.SMTP_USER ||
+      'alerts@example.com';
+
+    const provider = (process.env.EMAIL_PROVIDER || 'smtp').toLowerCase();
+
+    // Provider: RESEND
+    if (provider === 'resend') {
+      const apiKey = process.env.RESEND_API_KEY || '';
+      if (!apiKey) return { ok: false, skipped: true, reason: 'missing RESEND_API_KEY' };
+
+      const fn = async () => {
+        try {
+          const controller = new AbortController();
+          const t = setTimeout(() => controller.abort(), 20000); // 20s cap
+          const res = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              from: fromAddr,
+              to: recipients,
+              subject,
+              text,
+              html
+            }),
+            signal: controller.signal
+          }).finally(() => clearTimeout(t));
+
+          if (!res || !res.ok) {
+            const body = res ? await res.text().catch(()=> '') : '';
+            console.warn('Resend email HTTP err:', res?.status, body);
+            return { ok: false };
+          }
+          const data = await res.json().catch(()=> ({}));
+          return { ok: true, id: data.id };
+        } catch (e) {
+          console.warn('Resend email network error:', e?.message || e);
+          return { ok: false };
+        }
+      };
+
+      return await withRetries(fn, { tries: 2, baseMs: 700 });
+    }
+
+    // Provider: SENDGRID
+    if (provider === 'sendgrid') {
+      const sgKey = process.env.SENDGRID_API_KEY || '';
+      if (!sgKey) return { ok: false, skipped: true, reason: 'missing SENDGRID_API_KEY' };
+
+      const fn = async () => {
+        try {
+          const controller = new AbortController();
+          const t = setTimeout(() => controller.abort(), 20000);
+          const payload = {
+            personalizations: [{ to: recipients.map(e => ({ email: e })) }],
+            from: { email: fromAddr },
+            subject,
+            content: [{ type: html ? 'text/html' : 'text/plain', value: html || text || '' }]
+          };
+          const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${sgKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+          }).finally(() => clearTimeout(t));
+
+          if (!res || (res.status !== 202 && !res.ok)) {
+            const body = res ? await res.text().catch(()=> '') : '';
+            console.warn('SendGrid email HTTP err:', res?.status, body);
+            return { ok: false };
+          }
+          return { ok: true };
+        } catch (e) {
+          console.warn('SendGrid email network error:', e?.message || e);
+          return { ok: false };
+        }
+      };
+
+      return await withRetries(fn, { tries: 2, baseMs: 700 });
+    }
+
+    // Provider: SMTP (nodemailer)
+    if (provider === 'smtp') {
+      if (!smtpEnvReady || !smtp) {
+        return { ok: false, skipped: true, reason: 'SMTP_* env missing' };
+      }
+      try {
+        const info = await smtp.sendMail({
+          from: fromAddr,
+          to: recipients.join(','),
+          subject,
+          text: text || (html ? undefined : '(no body)'),
+          html
+        });
+        if (!info || !info.accepted || info.accepted.length === 0) {
+          console.warn('SMTP did not accept any recipients:', info);
+          return { ok: false };
+        }
+        return { ok: true, id: info.messageId };
+      } catch (e) {
+        console.warn('SMTP send error:', e?.message || e);
+        return { ok: false };
+      }
+    }
+
+    // Unknown provider
+    return { ok: false, skipped: true, reason: `unknown provider ${provider}` };
+  } catch (e) {
+    console.warn('Email send exception:', e);
+    return { ok: false };
+  }
 }
 
 // Normalize & fan-out an event to email + optional notifier (e.g., Discord)
