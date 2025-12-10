@@ -1,173 +1,125 @@
-const { Client, GatewayIntentBits, Routes } = require('discord.js');
-const { SlashCommandBuilder } = require('@discordjs/builders');
-require('dotenv').config()
+// discordbot.js
+// Node 18+ (uses global fetch)
 
+require('dotenv').config();
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 
+// ---- Helper: update server /config ----
+async function updateServerConfig({ lowerC, upperC }) {
+  const body = {};
+  if (typeof lowerC === 'number') body.lowerC = lowerC;
+  if (typeof upperC === 'number') body.upperC = upperC;
 
-const { REST } = require('@discordjs/rest');
-const rest = new REST({ version: '10' }).setToken(" "); //insert discord token
+  // If TSSERVER_URL is not set, default to local dev server
+  const baseUrl = process.env.TSSERVER_URL || 'http://localhost:3000/config';
+  const adminToken = process.env.ADMIN_TOKEN || '';
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ]
-});
+  const url = baseUrl + (adminToken ? `?token=${encodeURIComponent(adminToken)}` : '');
 
-const temps = new SlashCommandBuilder()
-  .setName('temp')
-  .setDescription('Enter the minimum and maximum temperatures')
-  .addNumberOption((option)=>
-    
-    option
-    .setName('minimum')
-    .setDescription('Enter the minimum temperature (Celsius)')
-    .setRequired(true)
-  )
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 
-  .addNumberOption((option) =>
-
-    option
-    .setName('maximum')
-    .setDescription('Enter the maximum temperature (Celsius)')
-    .setRequired(true)
-)
-
-const min = new SlashCommandBuilder()
-  .setName('min')
-  .setDescription('Enter the minimum temperature')
-  .addNumberOption((option)=>
-    
-    option
-    .setName('minimum')
-    .setDescription('Enter the minimum temperature (Celsius)')
-    .setRequired(true)
-  )
-
-const max = new SlashCommandBuilder()
-  .setName('max')
-  .setDescription('Enter the maximum temperature')
-  .addNumberOption((option)=>
-    
-    option
-    .setName('maximum')
-    .setDescription('Enter the maximum temperature (Celsius)')
-    .setRequired(true)
-  )
-
-  const range = new SlashCommandBuilder()
-  .setName('range')
-  .setDescription('View current range of temperatures')
-
-let MinTemp=0 
-let MaxTemp=0
-
-client.on('interactionCreate', (interaction) => {
-    if (interaction.commandName === 'temp') {
-      MinTemp= Math.min(interaction.options.getNumber('minimum'), interaction.options.getNumber('maximum'))
-      MaxTemp= Math.max(interaction.options.getNumber('minimum'), interaction.options.getNumber('maximum'))
-
-      
-      interaction.reply({
-        content: "Minimum: " + MinTemp + "°C" + "\nMaximum: " + MaxTemp + "°C",
-      })
-    }
-
-    if (interaction.commandName === 'min') {
-      MinTemp= (interaction.options.getNumber('minimum'))
-      
-      interaction.reply({
-        content: "Minimum: " + MinTemp + "°C",
-      })
-    }
-
-    if (interaction.commandName === 'max') {
-      MaxTemp= (interaction.options.getNumber('maximum'))
-      
-      interaction.reply({
-        content: "Maximum: " + MaxTemp + "°C",
-      })
-    }
-
-    if (interaction.commandName === 'range') {
-      if (MinTemp>MaxTemp){
-          [MinTemp, MaxTemp] = [MaxTemp, MinTemp];
-      }
-      interaction.reply({
-        content: "Minimum: " + MinTemp + "°C" + "\nMaximum: " + MaxTemp + "°C",
-      })
-    }
-  }
-)
-
-
-
-
-client.on('ready', () => {
-  console.log(`We have logged in as ${client.user.tag}`);
-
-  const CLIENT_ID = client.user.id;   // Get CLIENT_ID automatically from the bot user
-  const GUILD_ID = client.guilds.cache.id; // Get all guild IDs the bot is in
-
-  console.log(CLIENT_ID)
-  //console.log(GUILD_ID)
-
-  async function main() {
-  const commands = [
-  temps, min, max, range
-  ];
-  try {
-    console.log('Started refreshing application (/) commands.');
-    await rest.put(Routes.applicationCommands(CLIENT_ID), {
-      body: commands,
-    });
-    client.login(" "); //insert discord token
-  } catch (err) {
-    console.log(err);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    console.error('Failed to update server config:', res.status, text);
+    throw new Error('config_update_failed');
   }
 }
 
-main()
+// ---- Discord client ----
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
 });
 
-// $ sign commands
-//client.on('messageCreate', async (message) => {
-//   // Ignore bot's own messages
-  //if (message.author.id === client.user.id) {
-    //return;
-   //}
+// ---- Slash commands ----
+const commands = [
+  new SlashCommandBuilder()
+    .setName('setmin')
+    .setDescription('Set minimum temperature')
+    .addNumberOption(option =>
+      option.setName('value')
+        .setDescription('Minimum temperature in °C')
+        .setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('setmax')
+    .setDescription('Set maximum temperature')
+    .addNumberOption(option =>
+      option.setName('value')
+        .setDescription('Maximum temperature in °C')
+        .setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('setrange')
+    .setDescription('Set full temperature range')
+    .addNumberOption(option =>
+      option.setName('min')
+        .setDescription('Minimum temperature')
+        .setRequired(true))
+    .addNumberOption(option =>
+      option.setName('max')
+        .setDescription('Maximum temperature')
+        .setRequired(true)),
+].map(c => c.toJSON());
 
-//   // $hello command
- //if (message.content.startsWith('$helpt')) {
-   // await message.channel.send('Enter "$temp " followed by a space then the temperature range');
-   //}
+// ---- Register commands with Discord ----
+const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
-   //if (message.content.startsWith('$temp')) {
-   //const re = /^(-?\d+)\s(-?\d+)$/;
-   //let splitContent = message.content.slice(6);
-  //const patternRec = splitContent.match(re)
-  
-   //if(patternRec ){
-  //MinTemp = parseInt(patternRec[1]);
-  //MaxTemp = parseInt(patternRec[2]);
+(async () => {
+  try {
+    console.log('Registering slash commands...');
+    await rest.put(
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: commands },
+    );
+    console.log('✅ Slash commands registered!');
+  } catch (err) {
+    console.error('Error registering slash commands:', err);
+  }
+})();
 
-  //if(MinTemp>MaxTemp){
-    //MinTemp = patternRec[2]
-    //MaxTemp = patternRec[1]
-  //}
-    
-    //await message.channel.send('Minimum: '+ MinTemp + '°C' + '\nMaximum: ' + MaxTemp + '°C')
- // }
-   //else{
-    //await message.channel.send('Please enter integer values')
- //}
-//}
-//}
-//)
+// ---- Handle user input ----
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
 
-module.exports = {temps: temps.toJSON()};
-module.exports = {min: min.toJSON()};
-module.exports = {max: max.toJSON()};
-module.exports = {range: range.toJSON()};
-client.login(" "); //insert discord token
+  const { commandName, options } = interaction;
+
+  try {
+    if (commandName === 'setmin') {
+      const val = options.getNumber('value');
+      await updateServerConfig({ lowerC: val });
+      await interaction.reply(`✅ Minimum temperature set to **${val}°C** (server config updated)`);
+    }
+
+    if (commandName === 'setmax') {
+      const val = options.getNumber('value');
+      await updateServerConfig({ upperC: val });
+      await interaction.reply(`✅ Maximum temperature set to **${val}°C** (server config updated)`);
+    }
+
+    if (commandName === 'setrange') {
+      const min = options.getNumber('min');
+      const max = options.getNumber('max');
+      await updateServerConfig({ lowerC: min, upperC: max });
+      await interaction.reply(`✅ Temperature range set to **${min}°C → ${max}°C** (server config updated)`);
+    }
+  } catch (e) {
+    console.error(e);
+    if (!interaction.replied) {
+      await interaction.reply({
+        content: '❌ Failed to update server config on the backend.',
+        ephemeral: true,
+      });
+    }
+  }
+});
+
+// ---- Bot online log ----
+client.once('clientReady', () => {
+  console.log(`✅ Bot online as ${client.user.tag}`);
+});
+
+
+// ---- Login ----
+client.login(process.env.DISCORD_TOKEN);

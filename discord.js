@@ -1,15 +1,14 @@
 // discord.js (CommonJS)
 // Minimal Discord webhook client with basic rate limiting and 429 retry.
-// Requires Node 18+ (uses global fetch).
 
 const WEBHOOK = process.env.DISCORD_WEBHOOK_URL;
 const ENV_MIN_GAP_SEC = Number(process.env.DISCORD_MIN_SECONDS_BETWEEN_POSTS || 0);
 
-let lastPostMs = 0;
-
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+let lastPostMs = 0;
 
 async function postToDiscord(content, embeds = [], opts = {}) {
   const targetWebhook = opts.webhook_url || WEBHOOK;
@@ -17,25 +16,21 @@ async function postToDiscord(content, embeds = [], opts = {}) {
     return { ok: false, skipped: true, reason: "DISCORD_WEBHOOK_URL missing" };
   }
 
-  // simple flood control
   const now = Date.now();
   const minGapSec = Number(opts.min_gap_sec ?? ENV_MIN_GAP_SEC);
   if (minGapSec > 0 && now - lastPostMs < minGapSec * 1000) {
     await sleep(minGapSec * 1000 - (now - lastPostMs));
   }
 
-  const payload = {
-    content: content ?? "",
-    embeds,
-  };
+  const payload = { content: content ?? "", embeds };
   if (opts.username) payload.username = opts.username;
   if (opts.avatar_url) payload.avatar_url = opts.avatar_url;
 
-  // thread support (optional)
   let url = targetWebhook;
-  if (opts.thread_id) url += (url.includes("?") ? "&" : "?") + "thread_id=" + encodeURIComponent(opts.thread_id);
+  if (opts.thread_id) {
+    url += (url.includes("?") ? "&" : "?") + "thread_id=" + encodeURIComponent(opts.thread_id);
+  }
 
-  // up to 2 tries; handle 429 Retry-After
   for (let attempt = 1; attempt <= 2; attempt++) {
     const res = await fetch(url, {
       method: "POST",
@@ -68,7 +63,7 @@ function buildFreezerEmbed({ deviceId, tempC, bounds, status, whenIso, url }) {
       description: status || "Alert",
       url: url || undefined,
       fields: [
-        { name: "Temp (°C)", value: (tempC ?? '—').toString(), inline: true },
+        { name: "Temp (°C)", value: (tempC ?? "—").toString(), inline: true },
         { name: "Bounds", value: bounds || "—", inline: true },
       ],
       timestamp: whenIso || new Date().toISOString(),
