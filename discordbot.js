@@ -4,29 +4,116 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 
+console.log('ENV CHECK:', {
+  TSSERVER_URL: process.env.TSSERVER_URL,
+  ADMIN_TOKEN: process.env.ADMIN_TOKEN ? '(set)' : '(not set)',
+});
+
 // ---- Helper: update server /config ----
 async function updateServerConfig({ lowerC, upperC }) {
   const body = {};
   if (typeof lowerC === 'number') body.lowerC = lowerC;
   if (typeof upperC === 'number') body.upperC = upperC;
 
-  // If TSSERVER_URL is not set, default to local dev server
-  const baseUrl = process.env.TSSERVER_URL || 'http://localhost:3000/config';
   const adminToken = process.env.ADMIN_TOKEN || '';
 
-  const url = baseUrl + (adminToken ? `?token=${encodeURIComponent(adminToken)}` : '');
+  // Primary: whatever you set in env (e.g. https://freezer-monitor-server.onrender.com/config)
+  const primaryBase = process.env.TSSERVER_URL || null;
 
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  // Fallback: local dev server
+  const fallbackBase = 'http://localhost:3000/config';
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    console.error('Failed to update server config:', res.status, text);
-    throw new Error('config_update_failed');
+  // Only keep non-null entries
+  const targets = [primaryBase, fallbackBase].filter(Boolean);
+
+  let lastError = null;
+
+  for (const baseUrl of targets) {
+    const url = baseUrl + (adminToken ? `?token=${encodeURIComponent(adminToken)}` : '');
+
+    console.log('[CONFIG] Trying backend:', {
+      baseUrl,
+      url,
+      body,
+    });
+
+    try {
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        console.error('[CONFIG] Backend responded with error:', res.status, text, 'for', baseUrl);
+        lastError = new Error(`Backend ${baseUrl} responded with ${res.status}`);
+        continue; // try next backend
+      }
+
+      console.log('[CONFIG] Backend config update OK with status:', res.status, 'for', baseUrl);
+      return; // success, stop trying others
+    } catch (err) {
+      console.error('[CONFIG] Fetch failed (network-level error) for', baseUrl, ':', err);
+      lastError = err;
+      continue; // try next backend
+    }
   }
+
+  console.error('[CONFIG] All backend targets failed. Last error:', lastError);
+  throw new Error('config_update_failed');
+}
+
+// ---- Helper: fetch current /config with cloud+local fallback ----
+async function fetchServerConfig() {
+  const adminToken = process.env.ADMIN_TOKEN || '';
+
+  const primaryBase = process.env.TSSERVER_URL || null;
+  const fallbackBase = 'http://localhost:3000/config'; // local dev
+
+  const targets = [primaryBase, fallbackBase].filter(Boolean);
+
+  let lastError = null;
+
+  for (const baseUrl of targets) {
+    const url = baseUrl + (adminToken ? `?token=${encodeURIComponent(adminToken)}` : '');
+
+    console.log('[CONFIG] Fetching config from:', { baseUrl, url });
+
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        console.error('[CONFIG] GET /config error:', res.status, text, 'for', baseUrl);
+        lastError = new Error(`Backend ${baseUrl} responded with ${res.status}`);
+        continue;
+      }
+
+      const data = await res.json().catch(err => {
+        console.error('[CONFIG] Failed to parse JSON from', baseUrl, err);
+        return null;
+      });
+
+      if (!data) {
+        lastError = new Error(`Invalid JSON from ${baseUrl}`);
+        continue;
+      }
+
+      console.log('[CONFIG] Current config from', baseUrl, ':', data);
+      return data; // { lowerC, upperC, ... }
+    } catch (err) {
+      console.error('[CONFIG] Fetch failed (network-level) for', baseUrl, ':', err);
+      lastError = err;
+      continue;
+    }
+  }
+
+  console.error('[CONFIG] All config fetch targets failed. Last error:', lastError);
+  throw new Error('config_fetch_failed');
 }
 
 // ---- Discord client ----
@@ -61,23 +148,38 @@ const commands = [
       option.setName('max')
         .setDescription('Maximum temperature')
         .setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('getrange')
+    .setDescription('Show current configured temperature range'),
 ].map(c => c.toJSON());
 
+
+// ---- Register commands with Discord ---- ----
 // ---- Register commands with Discord ----
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
-(async () => {
-  try {
-    console.log('Registering slash commands...');
-    await rest.put(
-      Routes.applicationCommands(process.env.CLIENT_ID),
-      { body: commands },
-    );
-    console.log('✅ Slash commands registered!');
-  } catch (err) {
-    console.error('Error registering slash commands:', err);
-  }
-})();
+if (process.env.REGISTER_COMMANDS === 'true') {
+  (async () => {
+    try {
+      console.log('Registering slash commands...');
+
+      // Use GUILD commands during dev
+      await rest.put(
+        Routes.applicationGuildCommands(
+          process.env.CLIENT_ID,
+          process.env.GUILD_ID,        // <-- add this env var
+        ),
+        { body: commands },
+      );
+
+      console.log('✅ Slash commands registered!');
+    } catch (err) {
+      console.error('Error registering slash commands:', err);
+    }
+  })();
+}
+
+
 
 // ---- Handle user input ----
 client.on('interactionCreate', async interaction => {
@@ -86,40 +188,66 @@ client.on('interactionCreate', async interaction => {
   const { commandName, options } = interaction;
 
   try {
+    await interaction.deferReply({ ephemeral: true });
+
     if (commandName === 'setmin') {
       const val = options.getNumber('value');
       await updateServerConfig({ lowerC: val });
-      await interaction.reply(`✅ Minimum temperature set to **${val}°C** (server config updated)`);
-    }
+      await interaction.editReply(
+        `✅ Minimum temperature set to **${val}°C** (server config updated)`
+      );
 
-    if (commandName === 'setmax') {
+    } else if (commandName === 'setmax') {
       const val = options.getNumber('value');
       await updateServerConfig({ upperC: val });
-      await interaction.reply(`✅ Maximum temperature set to **${val}°C** (server config updated)`);
-    }
+      await interaction.editReply(
+        `✅ Maximum temperature set to **${val}°C** (server config updated)`
+      );
 
-    if (commandName === 'setrange') {
+    } else if (commandName === 'setrange') {
       const min = options.getNumber('min');
       const max = options.getNumber('max');
       await updateServerConfig({ lowerC: min, upperC: max });
-      await interaction.reply(`✅ Temperature range set to **${min}°C → ${max}°C** (server config updated)`);
+      await interaction.editReply(
+        `✅ Temperature range set to **${min}°C → ${max}°C** (server config updated)`
+      );
+
+    } else if (commandName === 'getrange') {
+      const cfg = await fetchServerConfig();
+      const lower = cfg.lowerC ?? 'not set';
+      const upper = cfg.upperC ?? 'not set';
+
+      await interaction.editReply(
+        `📏 Current temperature range:\n` +
+        `• Minimum: **${lower}°C**\n` +
+        `• Maximum: **${upper}°C**`
+      );
     }
+
   } catch (e) {
     console.error(e);
-    if (!interaction.replied) {
-      await interaction.reply({
-        content: '❌ Failed to update server config on the backend.',
-        ephemeral: true,
-      });
+    const errorMsg = '❌ Failed to update or fetch server config on the backend.';
+
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(errorMsg);
+      } else {
+        await interaction.reply({
+          content: errorMsg,
+          ephemeral: true,   // <-- here too
+        });
+      }
+    } catch (replyErr) {
+      console.error('Failed to send error reply:', replyErr);
     }
   }
 });
 
+
 // ---- Bot online log ----
-client.once('clientReady', () => {
+client.once('ready', () => {
   console.log(`✅ Bot online as ${client.user.tag}`);
 });
-
 
 // ---- Login ----
 client.login(process.env.DISCORD_TOKEN);

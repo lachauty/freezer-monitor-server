@@ -1,14 +1,29 @@
 // alerts.js
+// builds an Alert Manager to track per-device state such as the temperature
+// last recorded log time, and fault flags such as normal, alert, offline, online, or heartbeat.
+// The alert manager decides when to emit events such as when to alert for recovery, offline
+// and heartbeat/out of set temperature range.
+// Alerts such as SMTP, Resend (service for HTTPS to Email), and Discord Channel notifiers. 
+// Prevents spam using cooldowns, spike detection, and offline detection.
 
+
+// Provider selection
+// 1) smtp
+// 2) Resend
+// 3) SendGrid (optional)
 const EMAIL_PROVIDER = (process.env.EMAIL_PROVIDER || 'smtp').toLowerCase();
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || '';
 
 
 const nodemailer = require("nodemailer");
+// SMTP transport creation
+// creates a nodemailer transport if required environment variables (stored in .env file) exist
 const smtpEnvReady =
   !!process.env.SMTP_HOST && !!process.env.SMTP_USER && !!process.env.SMTP_PASS;
-const smtp = smtpEnvReady
+// secure is set if SMTP_SECURE is set (True)
+// if not SMTP is NULL and later code skips SMTP sending
+  const smtp = smtpEnvReady
   ? nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT ?? 587),
@@ -17,34 +32,42 @@ const smtp = smtpEnvReady
     })
   : null;
 
-// Heartbeat/cooldown/spike knobs
+// "Knobs" for behavior -> Tunes/adjusts parameters for how the program runs
+// Heartbeat knob -> We expect 300000ms or 300 sec of logging
 const HEARTBEAT_SEC = Number(
   process.env.HEARTBEAT_SEC ??
     (Number(process.env.KEEPALIVE_MS ?? 300000) / 1000)
 );
+// Alert cooldown knob -> prevents spamming alerts, and we expect 900/60 ~ 15 minutes of relief
 const COOLDOWN_SEC = Number(process.env.ALERT_COOLDOWN_SEC ?? 900);
+// Spike cooldown knob -> expects a massive delta > 1.5 temperature reading to send alerts if out of set temperature range
 const SPIKE_C = Number(process.env.SPIKE_C ?? 1.5);
 
+// getConfig is a function variable that returns an empty object
 let getConfig = () => ({});
 function setConfigGetter(fn) {
   if (typeof fn === "function") getConfig = fn;
 }
 
-// State per device
-// id -> { lastTs, lastTemp, lastSr, status: 'normal'|'alert'|'offline'|'fault', lastAlertAt: {key: ts}, lastOnlineAt }
+// State per device 
 const devices = new Map();
 
-// Utility for cooldown buckets
+// Utility for cooldown function
 function shouldCooldown(state, key, now) {
   const lastAt = state.lastAlertAt?.[key] || 0;
+
+  // checks the current time subtracted by the last recorded measurement
+  // to be greater than or equal to the cool down time
   if (now - lastAt >= COOLDOWN_SEC * 1000) {
+    //sets last alert to the next recorded alert
     state.lastAlertAt = state.lastAlertAt || {};
     state.lastAlertAt[key] = now;
-    return false; // NOT cooling down: allowed to send
+    return false;
   }
-  return true; // within cooldown window
+  return true;
 }
 
+// Function for Parsing email detail
 function parseRecipients(s) {
   if (!s) return [];
   return String(s)
@@ -53,7 +76,9 @@ function parseRecipients(s) {
     .filter(Boolean);
 }
 
+// asynchronous sleep function to call
 async function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+// 
 async function withRetries(fn, { tries=2, baseMs=600 } = {}) {
   let last;
   for (let i = 0; i < tries; i++) {
