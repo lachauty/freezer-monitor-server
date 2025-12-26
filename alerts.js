@@ -361,7 +361,8 @@ async function emitEvent(evt) {
   // check notifier for datatype and value
   if (typeof notifier === "function") {
     try {
-      // await for the notifier with the populated fields
+      // await for the notifier with the populated fields and spread
+      // spread syntax/operator allows for an iterable array expression
       await notifier({ ...evt, lower, upper, when });
     } 
     catch (e) {
@@ -503,6 +504,7 @@ function checkHeartbeats() {
   }
 }
 
+//function to get states of all device entries
 function getStates() {
   return [...devices.entries()].map(([id, s]) => ({ id, ...s }));
 }
