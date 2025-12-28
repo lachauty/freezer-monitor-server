@@ -627,34 +627,47 @@ app.get('/admin', adminAuth, (_req, res) => {
   res.type('html').send(`<!doctype html><meta charset="utf-8">
 <title>Freezer Admin</title>
 <style>
+// set body font and system ui
   :root{--b:#ddd;--t:#222;--m:24px}
   body{font-family:system-ui,Segoe UI,Roboto,Apple Color Emoji,Noto Color Emoji;margin:var(--m);color:var(--t)}
   input,button{padding:.45rem .6rem;font:inherit}
+  // set table, body and color and basic ui stuff
   table{border-collapse:collapse;margin-top:12px;width:100%}
   td,th{border:1px solid var(--b);padding:.45rem .6rem;text-align:left}
   .hint{color:#666;margin:.5rem 0}
   .pill{display:inline-block;padding:.15rem .45rem;border-radius:999px;border:1px solid var(--b);font-size:.85rem;cursor:pointer}
   .warn{margin-top:8px;padding:8px;border:1px dashed #f39;color:#b00;background:#fff4f6}
 </style>
+//header
 <h1>Freezer Admin</h1>
+// div for edit bounds
 <div class="hint">Edit per-device bounds. Leave blank to use global env (${LOWER}…${UPPER} °C). Use Global Settings to set email recipients and/or Discord webhook.</div>
 <div id="root">Loading…</div>
 <script>
+// javascript for website
+// token set to new url object ored with none
 const token = new URLSearchParams(location.search).get('token') || '';
 
+// set q function to ternary statement
 function q(v){ return v==null ? '' : v; }
 
+// load function 
 async function load(){
+// set promise to fetch
   const [devRes, cfgRes] = await Promise.all([
     fetch('/devices'+(token?('?token='+encodeURIComponent(token)) : '')),
     fetch('/config'+(token?('?token='+encodeURIComponent(token)) : ''))
   ]);
+
+  // await for following
   const dev = await devRes.json();
   const cfg = await cfgRes.json();
   const c = cfg.config || {};
 
+  // set el to documet get element by id
   const el=document.getElementById('root');
   el.innerHTML = \`
+  // html format
   <section style="margin:8px 0;padding:12px;border:1px solid var(--b);border-radius:8px">
     <h2 style="margin:0 0 8px 0">Global Settings</h2>
     <form id="globalForm" onsubmit="return saveConfig(event)">
@@ -666,6 +679,7 @@ async function load(){
           <input type="checkbox" name="alerts_enabled" id="alerts_enabled" \${c.alerts_enabled ? 'checked':''}>
           Enable alerts (Email + Discord)
         </label>
+        // action buttons to interface over the following check boxes
         <label style="display:inline-flex; gap:8px; align-items:center; margin-left:16px;">
           <input type="checkbox" name="email_enabled"  id="email_enabled"  \${c.email_enabled ? 'checked':''}>
           Email channel
@@ -677,10 +691,12 @@ async function load(){
 
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
+      // actionlisteners for lower and upper bounds
         <label>Default Lower (°C): <input name="lowerC" type="number" step="0.1" value="\${q(c.lowerC)}"></label>
         <label>Default Upper (°C): <input name="upperC" type="number" step="0.1" value="\${q(c.upperC)}"></label>
         <label>Alert To (comma-separated emails): <input name="alert_to_email" placeholder="e.g. alice@example.com,bob@lab.org" value="\${q(c.alert_to_email)}"></label>
       </div>
+      // for input text boxes
       <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
         <label>Discord Webhook URL: <input name="discord_webhook_url" style="min-width:420px" placeholder="https://discord.com/api/webhooks/..." value="\${q(c.discord_webhook_url)}"></label>
       </div>
@@ -694,6 +710,8 @@ async function load(){
   <table>
     <tr><th>ID</th><th>Name</th><th>Last Temp</th><th>Bounds</th><th>Edit</th></tr>
     \${dev.devices.map(d=>{
+
+      // set following values to ship across the internet to server
       const last = d.latest ? \`\${d.latest.temp_c}°C @ \${d.latest.ts}\` : '—';
       const lo = (d.cfg && d.cfg.lowerC!=null)? d.cfg.lowerC : '${LOWER}';
       const hi = (d.cfg && d.cfg.upperC!=null)? d.cfg.upperC : '${UPPER}';
@@ -705,6 +723,8 @@ async function load(){
           <td>\${last}</td>
           <td>\${lo}…\${hi}</td>
           <td>
+
+          // submit button
             <form onsubmit="return saveDevice(event,'\${d.id}')">
               <input name="name" placeholder="name" value="\${name}">
               <input name="lowerC" type="number" step="0.1" placeholder="lower" value="\${d.cfg?.lowerC ?? ''}">
@@ -719,21 +739,30 @@ async function load(){
   </table>\`;
 }
 
+// save device function
 async function saveDevice(ev,id){
   ev.preventDefault();
+  // set f to new formdata
   const f=new FormData(ev.target);
+  // set body to empty instance
   const body={};
+
+  // for loop to iterate through entries
   for(const [k,v] of f.entries()){
     if(k==='lowerC'||k==='upperC'){ if(v!=='') body[k]=Number(v); }
     else if(k==='name'){ body[k]=v; }
   }
+    // set r to fetch
   const r=await fetch('/devices/'+encodeURIComponent(id)+(token?('?token='+encodeURIComponent(token)):''),{
     method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)
   });
+  // check if r ok field fale then error message
   if(!r.ok){alert('Save failed: '+await r.text());return false;}
   load(); return false;
 }
 
+
+// save config function
 async function saveConfig(ev){
   ev.preventDefault();
   const f = new FormData(ev.target);
@@ -742,7 +771,9 @@ async function saveConfig(ev){
   body.alerts_enabled = !!document.getElementById('alerts_enabled')?.checked;
   body.email_enabled   = !!document.getElementById('email_enabled')?.checked;
   body.discord_enabled = !!document.getElementById('discord_enabled')?.checked;
+  // set for loop to iterate through f entries
   for (const [k,v] of f.entries()) {
+  // if statements to go continue and else to set body[k] to v
     if (k==='alerts_enabled' || k==='email_enabled' || k==='discord_enabled') continue; // handled above
     if (v === '') continue;
     if (k==='lowerC' || k==='upperC' || k==='discord_min_gap_sec') body[k] = Number(v);
@@ -756,6 +787,7 @@ async function saveConfig(ev){
   return false;
 }
 
+// set reset config function
 async function resetConfig(){
   if (!confirm('Reset ALL global settings to defaults from .env?')) return;
   const r = await fetch('/config/reset'+(token?('?token='+encodeURIComponent(token)) : ''), { method:'POST' });
@@ -763,12 +795,14 @@ async function resetConfig(){
   load();
 }
 
+//function to test alert
 async function testAlert(){
   const r = await fetch('/_test/alert', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
   if (!r.ok) { alert('Test failed: '+await r.text()); return; }
   alert('Test alert queued. Check your phone/email and Discord.');
 }
 
+//function reset device
 async function resetDevice(id){
   if (!confirm('Reset overrides for device '+id+'?')) return;
   const r = await fetch('/devices/'+encodeURIComponent(id)+'/reset'+(token?('?token='+encodeURIComponent(token)) : ''), { method:'POST' });
@@ -776,6 +810,7 @@ async function resetDevice(id){
   load();
 }
 
+// call load
 load();
 </script>`);
 });
