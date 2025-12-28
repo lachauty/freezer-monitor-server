@@ -768,6 +768,8 @@ async function saveConfig(ev){
   const f = new FormData(ev.target);
   const body = {};
   // always send alerts_enabled
+
+  // set the following fields to validate
   body.alerts_enabled = !!document.getElementById('alerts_enabled')?.checked;
   body.email_enabled   = !!document.getElementById('email_enabled')?.checked;
   body.discord_enabled = !!document.getElementById('discord_enabled')?.checked;
