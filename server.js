@@ -724,13 +724,14 @@ async function load(){
           <td>\${lo}…\${hi}</td>
           <td>
 
-          // submit button
+          // submit button to save and for lower and upper bound and multiple fields
             <form onsubmit="return saveDevice(event,'\${d.id}')">
               <input name="name" placeholder="name" value="\${name}">
               <input name="lowerC" type="number" step="0.1" placeholder="lower" value="\${d.cfg?.lowerC ?? ''}">
               <input name="upperC" type="number" step="0.1" placeholder="upper" value="\${d.cfg?.upperC ?? ''}">
               <button>Save</button>
               <a class="pill" href="/export.csv?device_id=\${encodeURIComponent(d.id)}\${token?('&token='+encodeURIComponent(token)) : ''}">Export CSV</a>
+              //button
               <button type="button" class="pill" onclick="resetDevice('\${d.id}')">Reset</button>
             </form>
           </td>
@@ -779,11 +780,14 @@ async function saveConfig(ev){
     if (k==='alerts_enabled' || k==='email_enabled' || k==='discord_enabled') continue; // handled above
     if (v === '') continue;
     if (k==='lowerC' || k==='upperC' || k==='discord_min_gap_sec') body[k] = Number(v);
+    //else set body index to be v
     else body[k] = v;
   }
+    // set r to await for fetch for following fields
   const r = await fetch('/config'+(token?('?token='+encodeURIComponent(token)) : ''), {
     method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
   });
+  //if r ok field is false send an error
   if (!r.ok) { alert('Save failed: '+await r.text()); return false; }
   load();
   return false;
@@ -791,23 +795,31 @@ async function saveConfig(ev){
 
 // set reset config function
 async function resetConfig(){
+// check if confirm is false then return
   if (!confirm('Reset ALL global settings to defaults from .env?')) return;
+  // check r to await for fetch
   const r = await fetch('/config/reset'+(token?('?token='+encodeURIComponent(token)) : ''), { method:'POST' });
+  // if r ok field is false alert reset error prompt
   if (!r.ok) { alert('Reset failed: '+await r.text()); return; }
   load();
 }
 
 //function to test alert
 async function testAlert(){
+// set r to fetch the following populate fields
   const r = await fetch('/_test/alert', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+  // if r ok field is false send alert
   if (!r.ok) { alert('Test failed: '+await r.text()); return; }
+  // alert with string
   alert('Test alert queued. Check your phone/email and Discord.');
 }
 
 //function reset device
 async function resetDevice(id){
+// if confirm false, r set to fetch token and method post
   if (!confirm('Reset overrides for device '+id+'?')) return;
   const r = await fetch('/devices/'+encodeURIComponent(id)+'/reset'+(token?('?token='+encodeURIComponent(token)) : ''), { method:'POST' });
+  // if r ok field is false alert device failure
   if (!r.ok) { alert('Device reset failed: '+await r.text()); return; }
   load();
 }
@@ -819,6 +831,7 @@ load();
 
 // Error handler (minimal)
 app.use((err, _req, res, _next) => {
+  // error handle
   const code = err?.status || 500;
   res.status(code).json({ error: err?.message || 'internal_error' });
 });
